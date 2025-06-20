@@ -1,6 +1,4 @@
-hello world
-
-# This script is called by ComfyUI-Manager & Comfy-CLI after requirements.txt is installed:
+# This script is called by ComfyUI-Manager & Comfy-CLI after requirements.txt is installed: 
 # https://github.com/ltdrdata/ComfyUI-Manager/tree/386af67a4c34db3525aa89af47a6f78c819926f2?tab=readme-ov-file#custom-node-support-guide
 
 import sys
@@ -193,3 +191,5 @@ try:
 except Exception as e:
     traceback.print_exc()
     cstr("Comfy3D install failed: Dependency installation has failed. Please install manually: https://github.com/MrForExample/ComfyUI-3D-Pack/tree/main/_Pre_Builds/README.md.").error.print()
+
+
