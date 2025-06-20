@@ -1,4 +1,3 @@
-hello world
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -171,3 +170,7 @@ _Pre_Builds/_Build_Wheels
 _Pre_Builds/_Libs
 
 .idea
+
+# Ignore old files
+*_old.py
+
