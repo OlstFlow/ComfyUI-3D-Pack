@@ -299,6 +299,7 @@ class FlashVDMVolumeDecoding:
         min_resolution: int = 63,
         mini_grid_num: int = 4,
         enable_pbar: bool = True,
+        grid_chunk: int = 65536, # Added for VRAM control
         **kwargs,
     ):
         processor = self.processor
@@ -314,9 +315,10 @@ class FlashVDMVolumeDecoding:
             resolutions.append(octree_resolution)
             octree_resolution = octree_resolution // 2
         resolutions.reverse()
-        resolutions[0] = round(resolutions[0] / mini_grid_num) * mini_grid_num - 1
-        for i, resolution in enumerate(resolutions[1:]):
-            resolutions[i + 1] = resolutions[0] * 2 ** (i + 1)
+        if resolutions: # Avoid error on empty list
+            resolutions[0] = round(resolutions[0] / mini_grid_num) * mini_grid_num - 1
+            for i, resolution in enumerate(resolutions[1:]):
+                resolutions[i + 1] = resolutions[0] * 2 ** (i + 1)
 
         logger.info(f"FlashVDMVolumeDecoding Resolution: {resolutions}")
 
@@ -330,7 +332,7 @@ class FlashVDMVolumeDecoding:
         xyz_samples, grid_size, length = generate_dense_grid_points(
             bbox_min=bbox_min,
             bbox_max=bbox_max,
-            octree_resolution=resolutions[0],
+            octree_resolution=resolutions[0] if resolutions else 63,
             indexing="ij"
         )
 
@@ -353,9 +355,12 @@ class FlashVDMVolumeDecoding:
             -1, mini_grid_size * mini_grid_size * mini_grid_size, 3
         )
         batch_logits = []
-        num_batchs = max(num_chunks // xyz_samples.shape[1], 1)
-        for start in tqdm(range(0, xyz_samples.shape[0], num_batchs),
-                          desc=f"FlashVDM Volume Decoding", disable=not enable_pbar):
+        
+        # Use grid_chunk from kwargs for VRAM control
+        num_batchs = max(grid_chunk // xyz_samples.shape[1], 1)
+
+        pbar = tqdm(range(0, xyz_samples.shape[0], num_batchs), desc=f"FlashVDM Volume Decoding [Coarse]", disable=not enable_pbar)
+        for start in pbar:
             queries = xyz_samples[start: start + num_batchs, :]
             batch = queries.shape[0]
             batch_latents = repeat(latents.squeeze(0), "p c -> b p c", b=batch)
@@ -370,6 +375,13 @@ class FlashVDMVolumeDecoding:
             (batch_size, grid_size[0], grid_size[1], grid_size[2])
         )
 
+        # === BUGFIX START: Reset Attention Processor State ===
+        # Re-setting the processor forces it to discard any cached low-res context
+        # and re-evaluate the cross-attention with the full-resolution 'latents' tensor.
+        logger.info("[Bugfix] Resetting attention processor state for hierarchical decoding.")
+        geo_decoder.set_default_cross_attention_processor()
+        # === BUGFIX END ===
+        
         for octree_depth_now in resolutions[1:]:
             grid_size = np.array([octree_depth_now + 1] * 3)
             resolution = bbox_size / octree_depth_now
@@ -395,39 +407,16 @@ class FlashVDMVolumeDecoding:
             next_points = (next_points * torch.tensor(resolution, dtype=torch.float32, device=device) +
                            torch.tensor(bbox_min, dtype=torch.float32, device=device))
 
-            query_grid_num = 6
-            min_val = next_points.min(axis=0).values
-            max_val = next_points.max(axis=0).values
-            vol_queries_index = (next_points - min_val) / (max_val - min_val) * (query_grid_num - 0.001)
-            index = torch.floor(vol_queries_index).long()
-            index = index[..., 0] * (query_grid_num ** 2) + index[..., 1] * query_grid_num + index[..., 2]
-            index = index.sort()
-            next_points = next_points[index.indices].unsqueeze(0).contiguous()
-            unique_values = torch.unique(index.values, return_counts=True)
-            grid_logits = torch.zeros((next_points.shape[1]), dtype=latents.dtype, device=latents.device)
-            input_grid = [[], []]
-            logits_grid_list = []
-            start_num = 0
-            sum_num = 0
-            for grid_index, count in zip(unique_values[0].cpu().tolist(), unique_values[1].cpu().tolist()):
-                if sum_num + count < num_chunks or sum_num == 0:
-                    sum_num += count
-                    input_grid[0].append(grid_index)
-                    input_grid[1].append(count)
-                else:
-                    processor.topk = input_grid
-                    logits_grid = geo_decoder(queries=next_points[:, start_num:start_num + sum_num], latents=latents)
-                    start_num = start_num + sum_num
-                    logits_grid_list.append(logits_grid)
-                    input_grid = [[grid_index], [count]]
-                    sum_num = count
-            if sum_num > 0:
-                processor.topk = input_grid
-                logits_grid = geo_decoder(queries=next_points[:, start_num:start_num + sum_num], latents=latents)
-                logits_grid_list.append(logits_grid)
-            logits_grid = torch.cat(logits_grid_list, dim=1)
-            grid_logits[index.indices] = logits_grid.squeeze(0).squeeze(-1)
-            next_logits[nidx] = grid_logits
+            batch_logits = []
+            pbar_fine = tqdm(range(0, next_points.shape[0], grid_chunk), desc=f"FlashVDM Volume Decoding [Fine r{octree_depth_now+1}]", disable=not enable_pbar)
+            for start in pbar_fine:
+                queries = next_points[start: start + grid_chunk, :].unsqueeze(0)
+                # On fine steps, we use the default cross attention, not FlashVDM's special one
+                logits = geo_decoder(queries=queries.to(latents.dtype), latents=latents)
+                batch_logits.append(logits)
+
+            logits_grid = torch.cat(batch_logits, dim=1)
+            next_logits[nidx] = logits_grid[0, ..., 0]
             grid_logits = next_logits.unsqueeze(0)
 
         grid_logits[grid_logits == -10000.] = float('nan')

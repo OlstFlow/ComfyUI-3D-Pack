@@ -16,6 +16,13 @@ import numpy as np
 from safetensors.torch import load_file
 from einops import rearrange
 
+# === PATCH START: Add missing core ComfyUI imports and VRAM patch imports ===
+import comfy.model_management
+import comfy.utils
+from tqdm import tqdm
+from Gen_3D_Modules.Hunyuan3D_2_1.hy3dshape.hy3dshape.pipelines import retrieve_timesteps
+# === PATCH END ===
+
 from diffusers import (
     DiffusionPipeline, 
     StableDiffusionPipeline
@@ -123,8 +130,6 @@ from Gen_3D_Modules.Hunyuan3D_2_1 import (
     create_glb_with_pbr_materials_2_1,
 )
 from Gen_3D_Modules.Hunyuan3D_2_1.hy3dpaint.utils.torchvision_fix import apply_fix
-from tqdm import tqdm
-from Gen_3D_Modules.Hunyuan3D_2_1.hy3dshape.hy3dshape.pipelines import retrieve_timesteps
 apply_fix()
 
 
@@ -158,16 +163,18 @@ DIFFUSERS_PIPE_DICT = OrderedDict([
     ("TripoSGScribblePipeline", TripoSGScribblePipeline),
 ])
 
+# === PATCH START: Correct the scheduler dictionary (removed trailing commas) ===
 DIFFUSERS_SCHEDULER_DICT = OrderedDict([
     ("EulerAncestralDiscreteScheduler", EulerAncestralDiscreteScheduler),
-    ("Wonder3DMVDiffusionPipeline", MVDiffusionImagePipeline),
-    ("EulerDiscreteScheduler,", EulerDiscreteScheduler),
-    ("DDIMScheduler,", DDIMScheduler),
-    ("DDIMParallelScheduler,", DDIMParallelScheduler),
-    ("LCMScheduler,", LCMScheduler),
-    ("KDPM2AncestralDiscreteScheduler,", KDPM2AncestralDiscreteScheduler),
-    ("KDPM2DiscreteScheduler,", KDPM2DiscreteScheduler),
+    ("EulerDiscreteScheduler", EulerDiscreteScheduler),
+    ("DDIMScheduler", DDIMScheduler),
+    ("DDIMParallelScheduler", DDIMParallelScheduler),
+    ("LCMScheduler", LCMScheduler),
+    ("KDPM2AncestralDiscreteScheduler", KDPM2AncestralDiscreteScheduler),
+    ("KDPM2DiscreteScheduler", KDPM2DiscreteScheduler),
 ])
+# === PATCH END ===
+
 
 ROOT_PATH = os.path.dirname(os.path.realpath(__file__))
 CKPT_ROOT_PATH = os.path.join(ROOT_PATH, "Checkpoints")
@@ -4277,86 +4284,55 @@ class TripoSG_Scribble_Model:
 
         return (mesh,)
 
-class Load_Hunyuan3D_V2_ShapeGen_Pipeline:
-    CATEGORY      = "Comfy3D/Algorithm"
-    RETURN_TYPES  = ("DIFFUSERS_PIPE",)
-    RETURN_NAMES  = ("shapegen_pipe",)
-    FUNCTION      = "load"
+# === PATCH START: Corrected and VRAM-optimized Hunyuan3D 2.1 Loader ===
+class Load_Hunyuan3D_21_ShapeGen_Pipeline:
+    """Load Hunyuan3D-2.1 Shape Generation Pipeline"""
+    
+    CATEGORY = "Comfy3D/Algorithm/Hunyuan3D-2.1"
+    RETURN_TYPES = ("DIFFUSERS_PIPE",)
+    RETURN_NAMES = ("shapegen_pipe",)
+    FUNCTION = "load"
 
-    _REPO_ID_BASE = "tencent"
-
-    _MODES = {
-        "Hunyuan3D-2":             ("Hunyuan3D-2",     "hunyuan3d-dit-v2-0",         30),
-        "Hunyuan3D-2-Fast":        ("Hunyuan3D-2",     "hunyuan3d-dit-v2-0-fast",    20),
-        "Hunyuan3D-2-Turbo":       ("Hunyuan3D-2",     "hunyuan3d-dit-v2-0-turbo",    5),
-        "Hunyuan3D-2mini":         ("Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini",       30),
-        "Hunyuan3D-2mini-Fast":    ("Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini-fast",   20),
-        "Hunyuan3D-2mini-Turbo":   ("Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini-turbo",  5),
-        "Hunyuan3D-2mv":           ("Hunyuan3D-2mv",   "hunyuan3d-dit-v2-mv",   30),
-        "Hunyuan3D-2mv-Fast":      ("Hunyuan3D-2mv",   "hunyuan3d-dit-v2-mv-fast",    20),
-        "Hunyuan3D-2mv-Turbo":     ("Hunyuan3D-2mv",   "hunyuan3d-dit-v2-mv-turbo",   5),
-    }
+    _REPO_ID = "Tencent/Hunyuan3D-2.1"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "generation_mode": (list(cls._MODES.keys()),),
-                "weights_format" : (["safetensors", "ckpt"],),
-                "flash_vdm"      : ("BOOLEAN", {"default": True}),
+                "subfolder": (["hunyuan3d-dit-v2-1"], {"default": "hunyuan3d-dit-v2-1"}),
+                "enable_flash_vdm_on_load": ("BOOLEAN", {"default": True}),
             }
         }
 
     @staticmethod
-    def _ensure_weights(repo: str, subfolder: str, use_safetensors: bool):
-        base_dir = os.path.join(CKPT_DIFFUSERS_PATH, f"{Load_Hunyuan3D_V2_ShapeGen_Pipeline._REPO_ID_BASE}/{repo}")
-        ckpt_file = "model.fp16.safetensors" if use_safetensors else "model.fp16.ckpt"
-        ckpt_path = os.path.join(base_dir, subfolder, ckpt_file)
+    def _ensure_weights(subfolder: str):
+        model_path = os.path.join(comfy_paths.get_folder_paths("diffusers")[0], Load_Hunyuan3D_21_ShapeGen_Pipeline._REPO_ID)
+        
+        if not os.path.exists(os.path.join(model_path, subfolder)):
+            print(f"Hunyuan3D-2.1 model not found in {model_path}. Attempting to download...")
+            from huggingface_hub import snapshot_download
+            model_path = snapshot_download(repo_id=Load_Hunyuan3D_21_ShapeGen_Pipeline._REPO_ID, local_dir=model_path, local_dir_use_symlinks=False)
+            print(f"Model downloaded to {model_path}")
+        
+        return model_path
 
-        if not os.path.exists(ckpt_path):
-            snapshot_download(
-                repo_id=f"{Load_Hunyuan3D_V2_ShapeGen_Pipeline._REPO_ID_BASE}/{repo}",
-                repo_type="model",
-                local_dir=base_dir,
-                resume_download=True,
-                ignore_patterns = HF_DOWNLOAD_IGNORE
-            )
-
-    @staticmethod
-    def _build_pipe(repo: str, subfolder: str, use_safetensors: bool, flash_vdm: bool):
-        Load_Hunyuan3D_V2_ShapeGen_Pipeline._ensure_weights(repo, subfolder, use_safetensors)
-
-        model_dir = os.path.join(CKPT_DIFFUSERS_PATH,
-                                 f"{Load_Hunyuan3D_V2_ShapeGen_Pipeline._REPO_ID_BASE}/{repo}",
-                                 subfolder)
-        ckpt = os.path.join(model_dir, "model.fp16.safetensors" if use_safetensors else "model.fp16.ckpt")
-        cfg  = os.path.join(model_dir, "config.yaml")
-
-        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_single_file(
-            ckpt_path=ckpt,
-            config_path=cfg,
-            device="cuda",
-            dtype=torch.float16,
-            use_safetensors=use_safetensors,
-            from_pretrained_kwargs={
-                "model_path": f"{Load_Hunyuan3D_V2_ShapeGen_Pipeline._REPO_ID_BASE}/{repo}",
-                "subfolder": subfolder,
-                "use_safetensors": use_safetensors,
-            },
+    def load(self, subfolder, enable_flash_vdm_on_load):
+        model_path = self._ensure_weights(subfolder)
+        
+        pipeline = Hunyuan3DDiTFlowMatchingPipeline_2_1.from_pretrained(
+            model_path,
+            subfolder=subfolder,
+            torch_dtype=torch.float16 if comfy.model_management.should_use_fp16() else torch.float32
         )
 
-        if flash_vdm and any(tag in subfolder for tag in ("turbo", "fast")):
-            pipe.enable_flashvdm(replace_vae=False)
+        if enable_flash_vdm_on_load:
+            if hasattr(pipeline, "enable_flashvdm"):
+                print("[VRAM & Speed Patch] Enabling FlashVDM for v2.1 acceleration on load...")
+                pipeline.enable_flashvdm(enabled=True)
+        
+        print("Hunyuan3D-2.1 ShapeGen pipeline loaded successfully.")
+        return (pipeline,)
 
-        return pipe.to("cuda", torch.float16)
-
-    def load(self, generation_mode, weights_format, flash_vdm):
-        repo, subfolder, def_steps = self._MODES[generation_mode]
-        use_safe = (weights_format == "safetensors")
-        pipe = self._build_pipe(repo, subfolder, use_safe, flash_vdm)
-        pipe.num_inference_steps = def_steps
-        return (pipe,)
-    
 class Load_Hunyuan3D_V2_TexGen_Pipeline: 
     CATEGORY     = "Comfy3D/Algorithm"
     RETURN_TYPES = ("DIFFUSERS_PIPE",)
@@ -5193,345 +5169,113 @@ class MVAdapter_Texture_Projection:
                 os.remove(temp_grid_path)
             raise e
 
-class Load_Hunyuan3D_21_ShapeGen_Pipeline:
-    """Load Hunyuan3D-2.1 Shape Generation Pipeline"""
-    
-    CATEGORY = "Comfy3D/Algorithm/Hunyuan3D-2.1"
-    RETURN_TYPES = ("DIFFUSERS_PIPE",)
-    RETURN_NAMES = ("shapegen_pipe",)
-    FUNCTION = "load"
-
-    _REPO_ID = "Tencent/Hunyuan3D-2.1"
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "subfolder": (["hunyuan3d-dit-v2-1"], {"default": "hunyuan3d-dit-v2-1"}),
-            }
-        }
-
-    @staticmethod
-    def _ensure_weights(subfolder: str):
-        # Use the standard ComfyUI path for diffusers models
-        model_path = os.path.join(comfy_paths.get_folder_paths("diffusers")[0], Load_Hunyuan3D_21_ShapeGen_Pipeline._REPO_ID)
-        
-        # Check if the model exists, if not, attempt to download.
-        if not os.path.exists(os.path.join(model_path, subfolder)):
-            print(f"Hunyuan3D-2.1 model not found in {model_path}. Attempting to download...")
-            from huggingface_hub import snapshot_download
-            model_path = snapshot_download(repo_id=Load_Hunyuan3D_21_ShapeGen_Pipeline._REPO_ID, local_dir=model_path, local_dir_use_symlinks=False)
-            print(f"Model downloaded to {model_path}")
-        
-        return model_path
-
-    def load(self, subfolder):
-        from Gen_3D_Modules.Hunyuan3D_2_1 import Hunyuan3DDiTFlowMatchingPipeline_2_1
-
-        model_path = self._ensure_weights(subfolder)
-        
-        # The model uses .ckpt files, so use_safetensors is False
-        pipeline = Hunyuan3DDiTFlowMatchingPipeline_2_1.from_pretrained(
-            model_path,
-            subfolder=subfolder,
-            use_safetensors=False, 
-            torch_dtype=torch.float16 if comfy.model_management.should_use_fp16() else torch.float32,
-            # Pass kwargs for enable_flashvdm to use later
-            from_pretrained_kwargs={
-                "model_path": self._REPO_ID,
-                "subfolder": subfolder,
-                "use_safetensors": False,
-            }
-        )
-        print("Hunyuan3D-2.1 ShapeGen pipeline loaded successfully.")
-        return (pipeline,)
-
-class Load_Hunyuan3D_21_TexGen_Pipeline:
-    """Load Hunyuan3D-2.1 Texture Generation Pipeline"""
-    
-    CATEGORY = "Comfy3D/Algorithm/Hunyuan3D-2.1"
-    RETURN_TYPES = ("DIFFUSERS_PIPE",)
-    RETURN_NAMES = ("texgen_pipe",)
-    FUNCTION = "load"
-
-    _REPO_ID_BASE = "tencent"
-    _REPO_NAME = "Hunyuan3D-2.1"
-
-    # Pipeline cache: { (max_view, res, mmgp) : pipeline }
-    _cache = {}
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "max_num_view": ("INT", {"default": 8, "min": 4, "max": 12}),
-                "resolution": ("INT", {"default": 768, "min": 512, "max": 1024, "step": 256}),
-                "enable_mmgp": ("BOOLEAN", {"default": True}),
-            }
-        }
-
-    @staticmethod 
-    def _ensure_weights():
-        repo_id = f"{Load_Hunyuan3D_21_TexGen_Pipeline._REPO_ID_BASE}/{Load_Hunyuan3D_21_TexGen_Pipeline._REPO_NAME}"
-        safe_repo_name = Load_Hunyuan3D_21_TexGen_Pipeline._REPO_NAME.replace(".", "_")
-        base_dir = os.path.join(CKPT_DIFFUSERS_PATH, f"{Load_Hunyuan3D_21_TexGen_Pipeline._REPO_ID_BASE}/{safe_repo_name}")
-        
-        target_folder = "hunyuan3d-paintpbr-v2-1"
-        required_files = [
-            f"{target_folder}/image_encoder/model.safetensors",
-            f"{target_folder}/text_encoder/pytorch_model.bin",
-            f"{target_folder}/unet/diffusion_pytorch_model.bin",
-            f"{target_folder}/vae/diffusion_pytorch_model.bin"
-        ]
-        
-        files_missing = []
-        
-        for file_path in required_files:
-            full_file_path = os.path.join(base_dir, file_path)
-            if not os.path.exists(full_file_path):
-                files_missing.append(file_path)
-        
-        if files_missing:
-            print(f"Loading Hunyuan3D-2.1 TexGen folder: {target_folder}")
-            print(f"Missing files: {len(files_missing)}")
-            snapshot_download(
-                repo_id=repo_id,
-                repo_type="model", 
-                local_dir=base_dir,
-                resume_download=True,
-                ignore_patterns=HF_DOWNLOAD_IGNORE,
-                allow_patterns=[f"{target_folder}/**"]
-            )
-            print(f"Hunyuan3D-2.1 TexGen {target_folder} downloaded successfully")
-        else:
-            print(f"Hunyuan3D-2.1 TexGen weights already loaded")
-
-        return base_dir
-
-    @staticmethod
-    def _ensure_realesrgan():
-        upscale_models_dir = os.path.join(ROOT_PATH, "..", "..", "models", "upscale_models")
-        realesrgan_path = os.path.join(upscale_models_dir, "RealESRGAN_x4plus.pth")
-        
-        if not os.path.exists(realesrgan_path):
-            print(f"RealESRGAN model not found, downloading from GitHub...")
-            os.makedirs(upscale_models_dir, exist_ok=True)
-            
-            import urllib.request
-            realesrgan_url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
-            
-            try:
-                print(f"Downloading RealESRGAN_x4plus.pth to {realesrgan_path}...")
-                urllib.request.urlretrieve(realesrgan_url, realesrgan_path)
-                print(f"RealESRGAN_x4plus.pth downloaded successfully")
-            except Exception as e:
-                print(f"Failed to download RealESRGAN_x4plus.pth: {e}")
-                raise
-        else:
-            print(f"Found existing RealESRGAN_x4plus.pth at {realesrgan_path}")
-        
-        return realesrgan_path
-
-    def load(self, max_num_view, resolution, enable_mmgp):
-        cache_key = (max_num_view, resolution, enable_mmgp)
-
-        # Check cache first
-        if cache_key in self._cache:
-            print(f"[TexGen-Loader] Using cached pipeline {cache_key}")
-            return (self._cache[cache_key],)
-
-        base_dir = self._ensure_weights()
-        realesrgan_path = self._ensure_realesrgan()
-        
-        # Configure pipeline
-        conf = Hunyuan3DPaintConfig_2_1(max_num_view=max_num_view, resolution=resolution)
-        conf.realesrgan_ckpt_path = realesrgan_path
-        conf.multiview_cfg_path = os.path.join(ROOT_PATH, "Gen_3D_Modules/Hunyuan3D_2_1/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml")
-        conf.custom_pipeline = os.path.join(ROOT_PATH, "Gen_3D_Modules/Hunyuan3D_2_1/hy3dpaint/hunyuanpaintpbr")
-
-        pipeline = Hunyuan3DPaintPipeline_2_1(conf)
-        
-        if enable_mmgp:
-            try:
-                core_pipe = pipeline.models["multiview_model"].pipeline
-                offload.profile(core_pipe, profile_type.LowRAM_LowVRAM)
-                print("mmgp optimization enabled for texture pipeline")
-            except Exception as e:
-                print(f"[mmgp] Failed to apply optimization for texture: {e}")
-        else:
-            print("mmgp optimization disabled for texture pipeline")
-        
-        # Save to cache and return
-        self._cache[cache_key] = pipeline
-        print(f"[TexGen-Loader] Cached new pipeline {cache_key}")
-        return (pipeline,)
-
+# === PATCH START: Corrected and VRAM-optimized Hunyuan3D 2.1 Generation Node ===
 class Hunyuan3D_21_ShapeGen:
-    """
-    Hunyuan3D-2.1 Shape Generation with two-stage VRAM management.
-    This version includes a master switch for FlashVDM and preserves all user controls.
-    """
-    CATEGORY = "Comfy3D/Algorithm/Hunyuan3D-2.1"
+    """Hunyuan3D-2.1 Shape Generation with aggressive two-stage VRAM management for low-memory GPUs."""
     
+    CATEGORY = "Comfy3D/Algorithm/Hunyuan3D-2.1"
+    RETURN_TYPES = ("MESH", "IMAGE")
+    RETURN_NAMES = ("mesh", "processed_image")
+    FUNCTION = "generate"
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "shapegen_pipe": ("DIFFUSERS_PIPE",),
                 "image": ("IMAGE",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "step": 1, "control_after_generate": "randomize"}),
-                "steps": ("INT", {"default": 50, "min": 1, "max": 100}),
+                "seed": ("INT", {"default": 1234, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 30, "min": 1, "max": 100}),
                 "guidance_scale": ("FLOAT", {"default": 7.5, "min": 0.0, "step": 0.1}),
-                "octree_resolution": ("INT", {"default": 256, "min": 64, "max": 1024}),
-                "mc_level": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01}),
-                "num_chunks": ("INT", {"default": 20000, "min": 1000, "max": 500000, "step": 1000, "tooltip": "For STANDARD decoder. Higher = less VRAM."}),
-                "grid_chunk": ("INT", {"default": 65536, "min": 4096, "max": 262144, "step": 4096, "tooltip": "For FlashVDM decoder. Lower = less VRAM."}),
-                "flash_vdm": ("BOOLEAN", {"default": True}),
+                "octree_resolution": ("INT", {"default": 256, "min": 64, "max": 512, "tooltip": "Самый мощный параметр для экономии VRAM. Начните с 96 или 128 для 6ГБ."}),
+                "num_chunks": ("INT", {"default": 80000, "min": 1000, "max": 500000, "step": 1000, "tooltip": "Для СТАНДАРТНОГО декодера (если FlashVDM отключен). Больше = меньше VRAM."}),
+                "grid_chunk": ("INT", {"default": 65536, "min": 4096, "max": 262144, "step": 4096, "tooltip": "Для УСКОРЕННОГО FlashVDM декодера. Меньше = меньше VRAM."}),
                 "remove_background": ("BOOLEAN", {"default": True}),
                 "auto_cleanup": ("BOOLEAN", {"default": True}),
-            },
+            }
         }
 
-    RETURN_TYPES = ("MESH", "IMAGE")
-    RETURN_NAMES = ("mesh", "processed_image")
-    FUNCTION = "generate"
-
-    def __init__(self):
-        self.shapegen_pipe = None
-        # CORRECT: Using comfy.model_management for device and dtype access
-        self.device = comfy.model_management.get_torch_device()
-        self.dtype = torch.float16 if comfy.model_management.should_use_fp16() else torch.float32
-
-    def load_model(self):
-        from Gen_3D_Modules.Hunyuan3D_2_1 import Hunyuan3DDiTFlowMatchingPipeline_2_1
-
-        model_name = "Tencent/Hunyuan3D-2.1"
-        model_path = os.path.join(comfy_paths.get_folder_paths("diffusers")[0], model_name)
-        
-        if not os.path.exists(os.path.join(model_path, "hunyuan3d-dit-v2-1")):
-            print(f"Hunyuan3D-2.1 model not found in {model_path}. Attempting to download...")
-            from huggingface_hub import snapshot_download
-            model_path = snapshot_download(repo_id=model_name, local_dir=model_path, local_dir_use_symlinks=False)
-            print(f"Model downloaded to {model_path}")
-
-        self.shapegen_pipe = Hunyuan3DDiTFlowMatchingPipeline_2_1.from_pretrained(
-            model_path,
-            subfolder="hunyuan3d-dit-v2-1",
-            use_safetensors=False, 
-            torch_dtype=self.dtype,
-            from_pretrained_kwargs={
-                "model_path": model_name, "subfolder": "hunyuan3d-dit-v2-1",
-                "use_safetensors": False, 'device': self.device,
-            }
-        )
-        print("Hunyuan3D-2.1 ShapeGen pipeline loaded successfully.")
-        return self.shapegen_pipe
-
     @torch.no_grad()
-    def generate(self, shapegen_pipe, image, seed, steps, guidance_scale, octree_resolution, mc_level, num_chunks, grid_chunk, flash_vdm, remove_background, auto_cleanup):
-        if self.shapegen_pipe is None:
-            self.shapegen_pipe = shapegen_pipe
-        
-        # --- VRAM Management ---
-        self.shapegen_pipe.to(device='cpu')
-        comfy.model_management.soft_empty_cache()
-        print("[Hunyuan3D Patch] VRAM management active. All components moved to CPU.")
+    def generate(self, shapegen_pipe, image, seed, steps, guidance_scale, octree_resolution, num_chunks, grid_chunk, remove_background, auto_cleanup):
+        print("[VRAM & Speed Patch] Initiating aggressive VRAM management...")
 
-        # --- FlashVDM Switch ---
-        if flash_vdm:
-            print("[Hunyuan3D] Enabling FlashVDM acceleration.")
-            self.shapegen_pipe.enable_flashvdm(enabled=True, adaptive_kv_selection=True, topk_mode='mean', mc_algo='mc', replace_vae=True)
-        else:
-            print("[Hunyuan3D] FlashVDM is disabled. Using standard decoder.")
-            self.shapegen_pipe.enable_flashvdm(enabled=False)
-            
         # --- Image Preprocessing ---
         pil_image = torch_imgs_to_pils(image)[0].convert("RGBA")
-        if remove_background:
-            print("[Hunyuan3D] Removing background...")
+        if remove_background or pil_image.mode == "RGB":
+            print("[VRAM Patch] Removing background...")
             rmbg_worker = BackgroundRemover_2_1()
             pil_image = rmbg_worker(pil_image.convert('RGB'))
             del rmbg_worker
-        
-        processed_image_tensor = pils_to_torch_imgs([pil_image])
-        generator = torch.manual_seed(seed)
-
-        # ========================================================================
-        # STAGE 1: LATENT GENERATION
-        # ========================================================================
-        print("[Hunyuan3D] Stage 1: Latent Generation Started. Moving conditioner and model to GPU.")
-        self.shapegen_pipe.conditioner.to(device=self.device, dtype=self.dtype)
-        self.shapegen_pipe.model.to(device=self.device, dtype=self.dtype)
-        
-        cond_inputs = self.shapegen_pipe.prepare_image(pil_image, mask=None)
-        image_tensor = cond_inputs.pop('image')
-        cond = self.shapegen_pipe.encode_cond(image=image_tensor.to(self.device), additional_cond_inputs=cond_inputs, do_classifier_free_guidance=True, dual_guidance=False)
-        batch_size = image_tensor.shape[0]
-
-        sigmas = np.linspace(0, 1, steps) if steps > 1 else np.array([0.0])
-        timesteps, _ = retrieve_timesteps(self.shapegen_pipe.scheduler, num_inference_steps=steps, device=self.device, sigmas=sigmas)
-        latents = self.shapegen_pipe.prepare_latents(batch_size, self.dtype, self.device, generator)
-        
-        guidance = None
-        if hasattr(self.shapegen_pipe.model, 'guidance_embed') and self.shapegen_pipe.model.guidance_embed:
-             guidance = torch.tensor([guidance_scale] * batch_size, device=self.device, dtype=self.dtype)
-
-        with torch.no_grad():
-            # CORRECT: Use comfy.utils for ProgressBar
-            pbar = comfy.utils.ProgressBar(len(timesteps))
-            for i, t in enumerate(timesteps):
-                latent_model_input = torch.cat([latents] * 2)
-                timestep_tensor = t.expand(latent_model_input.shape[0]).to(latents.dtype) / self.shapegen_pipe.scheduler.config.num_train_timesteps
-                noise_pred = self.shapegen_pipe.model(latent_model_input, timestep_tensor, cond, guidance=guidance)
-                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-                outputs = self.shapegen_pipe.scheduler.step(noise_pred, t, latents)
-                latents = outputs.prev_sample
-                pbar.update(1)
-
-        print("[Hunyuan3D] Stage 1: Latent Generation Finished.")
-        del cond, image_tensor, cond_inputs, noise_pred, noise_pred_cond, noise_pred_uncond, outputs
-
-        # ========================================================================
-        # INTERMISSION: VRAM Management
-        # ========================================================================
-        print("[Hunyuan3D] Offloading UNet and Conditioner to CPU.")
-        self.shapegen_pipe.model.to('cpu')
-        self.shapegen_pipe.conditioner.to('cpu')
-        comfy.model_management.soft_empty_cache()
-        
-        # ========================================================================
-        # STAGE 2: MESH DECODING
-        # ========================================================================
-        print("[Hunyuan3D] Stage 2: Mesh Decoding Started. Moving VAE to GPU.")
-        self.shapegen_pipe.vae.to(device=self.device, dtype=self.dtype)
-
-        with torch.no_grad():
-            outputs = self.shapegen_pipe._export(
-                latents, output_type='trimesh', mc_level=mc_level, octree_resolution=octree_resolution,
-                num_chunks=num_chunks, grid_chunk=grid_chunk, enable_pbar=False 
-            )
-            
-        print("[Hunyuan3D] Stage 2: Mesh Decoding Finished.")
-        mesh_trimesh = outputs[0] if isinstance(outputs, list) else outputs
-        
-        print("[Hunyuan3D] Post-processing mesh...")
-        face_reduce_worker = FaceReducer_2_1()
-        mesh_trimesh = face_reduce_worker(mesh_trimesh)
-        del face_reduce_worker
-
-        # --- Final Cleanup ---
-        if auto_cleanup:
-            print("[Hunyuan3D] Final cleanup enabled. Offloading all components.")
-            self.shapegen_pipe.to('cpu')
-            del latents, outputs
             gc.collect()
             torch.cuda.empty_cache()
-        else:
-            self.shapegen_pipe.vae.to('cpu')
+        
+        processed_image_tensor = pils_to_torch_imgs([pil_image])
+        generator = torch.manual_seed(int(seed))
+        device = comfy.model_management.get_torch_device()
+        dtype = torch.float16 if comfy.model_management.should_use_fp16() else torch.float32
+
+        # --- STAGE 1: LATENT GENERATION (UNet on GPU) ---
+        print("[VRAM & Speed Patch] Stage 1: Generating latents (UNet is active)...")
+        shapegen_pipe.to(device)
+
+        cond_inputs = shapegen_pipe.prepare_image(pil_image)
+        image_tensor = cond_inputs.pop('image')
+        cond = shapegen_pipe.encode_cond(image=image_tensor, additional_cond_inputs=cond_inputs, do_classifier_free_guidance=True, dual_guidance=False)
+        batch_size = image_tensor.shape[0]
+        sigmas = np.linspace(0, 1, steps)
+        timesteps, _ = retrieve_timesteps(shapegen_pipe.scheduler, steps, device, sigmas=sigmas)
+        latents = shapegen_pipe.prepare_latents(batch_size, dtype, device, generator)
+        
+        pbar = comfy.utils.ProgressBar(len(timesteps))
+        for i, t in enumerate(timesteps):
+            latent_model_input = torch.cat([latents] * 2)
+            timestep = t.expand(latent_model_input.shape[0]).to(latents.dtype)
+            timestep = timestep / shapegen_pipe.scheduler.config.num_train_timesteps
+            noise_pred = shapegen_pipe.model(latent_model_input, timestep, cond)
+            noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            outputs_step = shapegen_pipe.scheduler.step(noise_pred, t, latents)
+            latents = outputs_step.prev_sample
+            pbar.update(1)
+        print("[VRAM & Speed Patch] Latents generated successfully.")
+
+        # --- INTERMISSION: VRAM SWAP ---
+        print("[VRAM & Speed Patch] Stage 2: Offloading UNet to CPU to free VRAM for VAE decoding...")
+        if hasattr(shapegen_pipe, 'model'):
+            shapegen_pipe.model.to('cpu')
+            print("  - UNet (model) moved to CPU.")
+        if hasattr(shapegen_pipe, 'conditioner'):
+            shapegen_pipe.conditioner.to('cpu')
+            print("  - Conditioner moved to CPU.")
+        del cond, image_tensor, cond_inputs, noise_pred, noise_pred_cond, noise_pred_uncond, outputs_step
+        gc.collect()
+        comfy.model_management.soft_empty_cache()
+        print("[VRAM & Speed Patch] VRAM cleared for VAE.")
+
+        # --- STAGE 3: MESH DECODING (VAE on GPU) ---
+        print("[VRAM & Speed Patch] Stage 3: Exporting mesh from latents...")
+        shapegen_pipe.vae.to(device)
+        export_kwargs = {
+            'octree_resolution': octree_resolution, 'num_chunks': num_chunks, 'grid_chunk': grid_chunk,
+            'bounds': 1.01, 'mc_level': 0.0, 'mc_algo': 'mc', 'enable_pbar': True
+        }
+        outputs = shapegen_pipe.vae.latents2mesh(latents.to(device), **export_kwargs)
+        print("[VRAM & Speed Patch] Mesh exported successfully from latents.")
+        
+        mesh = export_to_trimesh_2_1(outputs)[0]
+        face_reduce_worker = FaceReducer_2_1()
+        mesh = face_reduce_worker(mesh)
+        del face_reduce_worker, outputs, latents
+        
+        # --- FINAL CLEANUP ---
+        if auto_cleanup:
+            print("[VRAM Patch] Final cleanup...")
+            shapegen_pipe.to('cpu')
+            gc.collect()
             comfy.model_management.soft_empty_cache()
-            
-        mesh_out = Mesh.load_trimesh(given_mesh=mesh_trimesh)
+            print("Shape pipeline fully cleaned up and offloaded.")
+        
+        mesh_out = Mesh.load_trimesh(given_mesh=mesh)
         mesh_out.auto_normal()
         
         return (mesh_out, processed_image_tensor)
@@ -5563,8 +5307,7 @@ class Hunyuan3D_21_TexGen:
 
         pil_image = torch_imgs_to_pils(image)[0]
         
-        # Save files to output/Hun2-1 directory
-        output_dir = "output/Hun2-1"
+        output_dir = os.path.join(comfy_paths.output_directory, "Hunyuan3D_2_1_TexGen")
         os.makedirs(output_dir, exist_ok=True)
         
         image_path = os.path.join(output_dir, "hunyuan_input.png")
@@ -5577,7 +5320,7 @@ class Hunyuan3D_21_TexGen:
                 mesh_path=mesh_path,
                 image_path=image_path,
                 output_mesh_path=output_path,
-                save_glb=True,  # Always create GLB
+                save_glb=True,
                 use_remesh=use_remesh
             )
             
@@ -5588,69 +5331,37 @@ class Hunyuan3D_21_TexGen:
                 
                 if not os.path.exists(glb_path):
                     base_path = os.path.splitext(result_path)[0]
-                    textures_dict = {
-                        'albedo': f"{base_path}.jpg",
-                    }
-                    
-                    metallic_path = f"{base_path}_metallic.jpg"
-                    roughness_path = f"{base_path}_roughness.jpg"
-                    normal_path = f"{base_path}_normal.jpg"
-                    
-                    if os.path.exists(metallic_path):
-                        textures_dict['metallic'] = metallic_path
-                    if os.path.exists(roughness_path):
-                        textures_dict['roughness'] = roughness_path
-                    if os.path.exists(normal_path):
-                        textures_dict['normal'] = normal_path
+                    textures_dict = {'albedo': f"{base_path}.jpg"}
+                    if os.path.exists(f"{base_path}_metallic.jpg"): textures_dict['metallic'] = f"{base_path}_metallic.jpg"
+                    if os.path.exists(f"{base_path}_roughness.jpg"): textures_dict['roughness'] = f"{base_path}_roughness.jpg"
+                    if os.path.exists(f"{base_path}_normal.jpg"): textures_dict['normal'] = f"{base_path}_normal.jpg"
                     
                     try:
                         create_glb_with_pbr_materials_2_1(result_path, textures_dict, glb_path)
-                        print(f"Created GLB with full PBR materials: {glb_path}")
+                        print(f"Created GLB with PBR materials: {glb_path}")
                     except Exception as e:
                         print(f"Warning: Failed to create GLB with PBR materials: {e}")
-                        # Fallback to basic conversion
-                        from .Gen_3D_Modules.Hunyuan3D_2_1.hy3dpaint.DifferentiableRenderer.mesh_utils import convert_obj_to_glb
-                        convert_obj_to_glb(result_path, glb_path)
-                        print(f"Created GLB with basic conversion: {glb_path}")
-                
+
                 if os.path.exists(glb_path):
                     try:
-                        glb_scene = trimesh.load(glb_path)
-                        
-                        if hasattr(glb_scene, 'geometry') and glb_scene.geometry:
-                            mesh_name = list(glb_scene.geometry.keys())[0]
-                            glb_mesh = glb_scene.geometry[mesh_name]
-                        else:
-                            glb_mesh = glb_scene
-                        
-                        mesh_out = Mesh.load_trimesh(given_mesh=glb_mesh)
+                        glb_mesh = trimesh.load(glb_path, force='scene')
+                        mesh_out = Mesh.load_trimesh(given_mesh=glb_mesh.geometry[next(iter(glb_mesh.geometry))])
                         mesh_out.auto_normal()
-                        print(f"Loaded GLB mesh with PBR materials from: {glb_path}")
                     except Exception as e:
                         print(f"Warning: Failed to load GLB mesh: {e}")
-                        print(f"GLB path was: {glb_path}")
             
-            # If PBR failed or not requested, load regular textured mesh
             if mesh_out is None:
                 textured_mesh = trimesh.load(result_path)
                 mesh_out = Mesh.load_trimesh(given_mesh=textured_mesh)
                 mesh_out.auto_normal()
-                if create_pbr:
-                    print("Warning: PBR creation failed, loaded regular textured mesh")
-                else:
-                    print("Loaded regular textured mesh")
+                print("Loaded regular textured mesh.")
             
             return (mesh_out,)
             
         finally:
-            # Clean up files
-            torch.cuda.empty_cache()
             gc.collect()
-            
+            torch.cuda.empty_cache()
             for file_path in [image_path, output_path]:
                 try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                except:
-                    pass
-
+                    if os.path.exists(file_path): os.remove(file_path)
+                except: pass
