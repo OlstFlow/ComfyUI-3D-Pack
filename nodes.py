@@ -5251,7 +5251,7 @@ class Hunyuan3D_21_ShapeGen:
         gc.collect()
         comfy.model_management.soft_empty_cache()
         print("[VRAM & Speed Patch] VRAM cleared for VAE.")
-
+        
         # --- STAGE 3: MESH DECODING (VAE on GPU) ---
         print("[VRAM & Speed Patch] Stage 3: Exporting mesh from latents...")
         shapegen_pipe.vae.to(device)
@@ -5259,7 +5259,11 @@ class Hunyuan3D_21_ShapeGen:
             'octree_resolution': octree_resolution, 'num_chunks': num_chunks, 'grid_chunk': grid_chunk,
             'bounds': 1.01, 'mc_level': 0.0, 'mc_algo': 'mc', 'enable_pbar': True
         }
-        outputs = shapegen_pipe.vae.latents2mesh(latents.to(device), **export_kwargs)
+        # === PATCH: Correct latent transformation before mesh extraction ===
+        latents = 1. / shapegen_pipe.vae.scale_factor * latents
+        latents = shapegen_pipe.vae(latents.to(device))
+        outputs = shapegen_pipe.vae.latents2mesh(latents, **export_kwargs)
+        # === END PATCH ===
         print("[VRAM & Speed Patch] Mesh exported successfully from latents.")
         
         mesh = export_to_trimesh_2_1(outputs)[0]
